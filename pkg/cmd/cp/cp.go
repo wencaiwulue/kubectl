@@ -337,7 +337,7 @@ func (o *CopyOptions) copyFromPod(src, dest fileSpec) error {
 	// remove extraneous path shortcuts - these could occur if a path contained extra "../"
 	// and attempted to navigate beyond "/" in a remote filesystem
 	prefix := stripPathShortcuts(srcFile.StripSlashes().Clean().String())
-	return o.untarAll(src.PodNamespace, src.PodName, prefix, srcFile, destFile, reader)
+	return o.untarAll(prefix, destFile, reader)
 }
 
 type TarPipe struct {
@@ -371,11 +371,11 @@ func (t *TarPipe) initReadFrom(n uint64) {
 			PodName:   t.src.PodName,
 		},
 
-		Command:  []string{"tar", "cf", "-", t.src.File.String()},
+		Command:  []string{"tar", "cfh", "-", t.src.File.String()},
 		Executor: &exec.DefaultRemoteExecutor{},
 	}
 	if t.o.MaxTries != 0 {
-		options.Command = []string{"sh", "-c", fmt.Sprintf("tar cf - %s | tail -c+%d", t.src.File, n)}
+		options.Command = []string{"sh", "-c", fmt.Sprintf("tar cfh - %s | tail -c+%d", t.src.File, n)}
 	}
 
 	go func() {
@@ -481,10 +481,13 @@ func recursiveTar(srcDir, srcFile localPath, destDir, destFile remotePath, tw *t
 	return nil
 }
 
-func (o *CopyOptions) untarAll(ns, pod string, prefix string, src remotePath, dest localPath, reader io.Reader) error {
-	symlinkWarningPrinted := false
+func (o *CopyOptions) untarAll(prefix string, dest localPath, reader io.Reader) error {
 	// TODO: use compression here?
 	tarReader := tar.NewReader(reader)
+	var linkList []tar.Header
+	var genDstFilename = func(headerName string) localPath {
+		return dest.Join(newRemotePath(headerName[len(prefix):]))
+	}
 	for {
 		header, err := tarReader.Next()
 		if err != nil {
@@ -503,12 +506,10 @@ func (o *CopyOptions) untarAll(ns, pod string, prefix string, src remotePath, de
 			return fmt.Errorf("tar contents corrupted")
 		}
 
-		// basic file information
-		mode := header.FileInfo().Mode()
 		// header.Name is a name of the REMOTE file, so we need to create
 		// a remotePath so that it goes through appropriate processing related
 		// with cleaning remote paths
-		destFileName := dest.Join(newRemotePath(header.Name[len(prefix):]))
+		destFileName := genDstFilename(header.Name)
 
 		if !isRelative(dest, destFileName) {
 			fmt.Fprintf(o.IOStreams.ErrOut, "warning: file %q is outside target destination, skipping\n", destFileName)
@@ -525,17 +526,6 @@ func (o *CopyOptions) untarAll(ns, pod string, prefix string, src remotePath, de
 			continue
 		}
 
-		if mode&os.ModeSymlink != 0 {
-			if !symlinkWarningPrinted && len(o.ExecParentCmdName) > 0 {
-				fmt.Fprintf(o.IOStreams.ErrOut,
-					"warning: skipping symlink: %q -> %q (consider using \"%s exec -n %q %q -- tar cf - %q | tar xf -\")\n",
-					destFileName, header.Linkname, o.ExecParentCmdName, ns, pod, src)
-				symlinkWarningPrinted = true
-				continue
-			}
-			fmt.Fprintf(o.IOStreams.ErrOut, "warning: skipping symlink: %q -> %q\n", destFileName, header.Linkname)
-			continue
-		}
 		outFile, err := os.Create(destFileName.String())
 		if err != nil {
 			return err
@@ -545,6 +535,19 @@ func (o *CopyOptions) untarAll(ns, pod string, prefix string, src remotePath, de
 			return err
 		}
 		if err := outFile.Close(); err != nil {
+			return err
+		}
+
+		// all file became into normal file, this means linkList to another file, do it later
+		if header.Linkname != "" {
+			linkList = append(linkList, *header)
+		}
+	}
+
+	// handle linked file
+	for _, f := range linkList {
+		err := copyFromLink(linkList, f, genDstFilename)
+		if err != nil {
 			return err
 		}
 	}
@@ -572,4 +575,33 @@ func (o *CopyOptions) execute(options *exec.ExecOptions) error {
 		return err
 	}
 	return nil
+}
+
+// copy from another real file
+func copyFromLink(fileHeaderList []tar.Header, currFile tar.Header, genDstFilename func(headerName string) localPath) error {
+	for _, t := range fileHeaderList {
+		if t.Name == currFile.Linkname {
+			// handle it recursive if linkA --> linkB --> originFile
+			return copyFromLink(fileHeaderList, t, genDstFilename)
+		}
+	}
+
+	var err error
+	var r, w *os.File
+	// read from origin file
+	r, err = os.OpenFile(genDstFilename(currFile.Linkname).String(), os.O_RDONLY, 0644)
+	if err != nil {
+		return err
+	}
+
+	// write to current file
+	w, err = os.OpenFile(genDstFilename(currFile.Name).String(), os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(w, r)
+	if closeErr := w.Close(); closeErr != nil && err == nil {
+		err = closeErr
+	}
+	return err
 }

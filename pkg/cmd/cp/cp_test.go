@@ -413,7 +413,7 @@ func TestTarUntar(t *testing.T) {
 	}
 
 	reader := bytes.NewBuffer(writer.Bytes())
-	if err := opts.untarAll("", "", "", remotePath{}, newLocalPath(dir2), reader); err != nil {
+	if err := opts.untarAll("", newLocalPath(dir2), reader); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -475,7 +475,7 @@ func TestTarUntarWrongPrefix(t *testing.T) {
 	}
 
 	reader := bytes.NewBuffer(writer.Bytes())
-	err = opts.untarAll("", "", "verylongprefix-showing-the-tar-was-tempered-with", remotePath{}, newLocalPath(dir2), reader)
+	err = opts.untarAll("verylongprefix-showing-the-tar-was-tempered-with", newLocalPath(dir2), reader)
 	if err == nil || !strings.Contains(err.Error(), "tar contents corrupted") {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -590,7 +590,7 @@ func TestBadTar(t *testing.T) {
 	}
 
 	opts := NewCopyOptions(genericclioptions.NewTestIOStreamsDiscard())
-	if err := opts.untarAll("", "", "/prefix", remotePath{}, newLocalPath(dir), &buf); err != nil {
+	if err := opts.untarAll("/prefix", newLocalPath(dir), &buf); err != nil {
 		t.Errorf("unexpected error: %v ", err)
 		t.FailNow()
 	}
@@ -910,7 +910,7 @@ func TestUntar(t *testing.T) {
 	output := (*testWriter)(t)
 	opts := NewCopyOptions(genericclioptions.IOStreams{In: &bytes.Buffer{}, Out: output, ErrOut: output})
 
-	require.NoError(t, opts.untarAll("", "", "", remotePath{}, newLocalPath(basedir), buf))
+	require.NoError(t, opts.untarAll("", newLocalPath(basedir), buf))
 
 	filepath.Walk(testdir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -961,7 +961,7 @@ func TestUntar_SingleFile(t *testing.T) {
 	output := (*testWriter)(t)
 	opts := NewCopyOptions(genericclioptions.IOStreams{In: &bytes.Buffer{}, Out: output, ErrOut: output})
 
-	require.NoError(t, opts.untarAll("", "", srcName, remotePath{}, newLocalPath(dest), buf))
+	require.NoError(t, opts.untarAll(srcName, newLocalPath(dest), buf))
 	cmpFileData(t, dest, content)
 }
 
